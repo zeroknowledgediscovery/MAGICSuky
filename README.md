@@ -1,22 +1,46 @@
 # DTAG — Digital Twin Anchored Generation
 
-ZeD Lab, University of Kentucky · contact: ishanu_ch@uky.edu
+**ZeD Lab · University of Kentucky** · ishanu_ch@uky.edu
 
-DTAG builds survey-grounded digital twins of respondents. Every answer is anchored to the
-conditional response distributions of native Large Science Models trained on the GSS, the World
-Values Survey, Afrobarometer and Eurobarometer: 252 models, each with a semantic map.
+**[Launch DTAG Workbench](https://dtag-workbench-gp7m2nymma-ue.a.run.app)** · **[DTAG Manual (PDF)](docs/DTAG_manual.pdf)** ·  **[Run the Workbench locally](webapp/README.md#source-checkout)**
 
-This README is the platform manual. It covers what DTAG is for and how it works, describes every part
-of the web workbench, and says where each piece of information comes from: the models, maps, poles,
-registries and the language model. It also lists exactly which surveys, years and countries are covered.
+DTAG is a research workbench for constructing and interrogating **survey-grounded digital respondents**. A researcher describes a persona, selects a survey and time period, and converses with a simulated respondent whose answers are anchored to conditional distributions from a native **Large Science Model (LSM)**. Natural-language interpretation and presentation are handled by a language model; survey-response content comes from the LSM. Rather than treating the generated prose as an opaque chatbot response, DTAG exposes the underlying survey variables, response probabilities, selected anchors, and evolving respondent state.
 
-| If you want to… | Read |
-|---|---|
-| get the web app running in five minutes | **[QUICKSTART.md](QUICKSTART.md)** |
-| understand and use the platform | this manual |
-| call the HTTP API or work on the web app | [webapp/README.md](webapp/README.md), [webapp/HANDOFF.md](webapp/HANDOFF.md) |
-| work on the code, maps, poles or models | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) |
-| see the question-optimization research | [docs/QUESTION_OPTIMIZATION.md](docs/QUESTION_OPTIMIZATION.md), [optimizer/README.md](optimizer/README.md) |
+The workbench supports two independent respondents side by side, allowing the same questions to be posed to different modeled perspectives. It visualizes how new answers change the model's predicted response landscape; for GSS models, it also tracks a wave-specific ideology index and its trajectory. Suggested questions, sequential questioning, automated pushes, and replayable experiments provide tools for investigating how patterns of survey responses depend on accumulated information. These are **conditional simulations, not causal estimates of persuasion or representations of identifiable people**.
+
+DTAG currently covers **252 survey models** across the General Social Survey (35 waves), Afrobarometer (9 rounds), World Values Survey (1 pooled WVS7 model), and Eurobarometer (207 studies), with semantic maps linking model variables to survey questions.
+
+## Run the Workbench locally
+
+From a checkout of **`main`**, set up Python 3.13 (Linux x86-64), install dependencies, and start the backend and built web interface:
+
+```bash
+git clone https://github.com/zeroknowledgediscovery/DTAG.git
+cd DTAG
+python3.13 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+export OPENAI_API_KEY="..."   # or: export DTAG_LLM_BACKEND=mock
+bash webapp/run.sh
+```
+
+Open **[http://127.0.0.1:8000](http://127.0.0.1:8000)** on the same computer (API documentation at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)). The `127.0.0.1` address is **local to the machine running DTAG**, not a publicly hosted URL. For frontend development with hot reload, use `bash webapp/run.sh --dev` and open **http://localhost:5173**. The native LSM extension must be importable; if it is not, run `bash scripts/build_native_bindings.sh`. Models download on demand.
+
+See the [local webapp instructions](webapp/README.md#source-checkout), [quick start](QUICKSTART.md), and [deployment notes](CLOUD_RUN.md) for alternatives including Docker.
+
+## Workbench interface
+
+![Approved annotated screenshot of the DTAG Workbench showing nine numbered interface areas](docs/dtag-workbench-annotated-guide.png)
+
+*Annotated DTAG Workbench interface. The numbers identify the principal controls and outputs.*
+
+Begin at the **left panel**, where you define the respondent's persona, geography, time, and survey model. Once initialized, the respondent's predicted-answer landscape appears below. The **center panes** display the conversation with one or two respondents; each answer can be expanded to inspect its native model evidence. The **right panel** provides ideology trajectories where supported, recommended next questions, automated push controls, experiments, and exports. Use the **bottom composer** to direct a question to respondent A, B, or both, or to run an ordered sequence. The **top toolbar** provides model readiness and application controls.
+
+A practical first experiment is to initialize two contrasting personas using the same GSS wave, ask both the same question, compare their anchored answers, and inspect how their predicted distributions and ideology trajectories change. Export the results before resetting or redeploying: the current Cloud Run service retains active respondent states in process memory and does not guarantee recovery after instance replacement.
+
+The [DTAG Workbench](https://dtag-workbench-gp7m2nymma-ue.a.run.app) is password-protected. [PsiSim](https://psisim-gp7m2nymma-ue.a.run.app) is a separate companion application for native LSM simulation, with independent sessions. For local installation see [QUICKSTART.md](QUICKSTART.md); for the web application and API see [webapp/README.md](webapp/README.md); for deployment see [CLOUD_RUN.md](CLOUD_RUN.md).
+
+The remainder of this README is the technical reference, including scientific assumptions, model coverage, architecture, detailed controls, experiments, API, and reproducibility.
 
 ---
 
