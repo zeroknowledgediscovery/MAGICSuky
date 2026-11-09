@@ -1,0 +1,568 @@
+# DTAG Web Application
+
+> **New here? Start with [QUICKSTART.md](../QUICKSTART.md)** — install, run and use
+> the web app in five steps. This page is the full reference.
+> **Taking over development or deploying it?** Read [HANDOFF.md](HANDOFF.md).
+> **What DTAG is, where models and data come from, survey coverage:** see the platform manual,
+> [README.md](../README.md).
+
+A browser workbench and HTTP API for **DTAG — Digital Twin Anchored Generation**
+over the native Large Science Model (LSM) corpus (35 GSS + 9 Afrobarometer +
+1 WVS7 + 207 Eurobarometer = 252 native models, 252 semantic maps).
+
+The web application is a thin layer over the same scientific core the command
+line uses:
+
+```text
+native LSM (dtag_lsm.Runtime, persistent)      scripts/model_backend.py
+        ↑
+DTAGSession  (respondent state, anchors, fallback, ideology)   scripts/dtag_session.py
+        ↑
+DTAGEngine   (catalog, model registry, profiles, EB routing)   scripts/dtag_engine.py
+        ↑                                   ↑
+FastAPI  webapp/backend/dtag_web     (optimizer/ also drives DTAGSession / dtag_core)
+        ↑
+React/TypeScript UI  webapp/frontend
+```
+
+Survey-response anchors always come from native LSM conditional
+distributions. The OpenAI model only maps questions to survey variables,
+interprets the persona, bridges semantic fallback and renders the anchored
+answer in prose. See [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) for the
+design and the scientific-equivalence evidence.
+
+---
+
+## Quick start: direct Git install (no clone)
+
+```bash
+python3.13 -m venv .venv
+source .venv/bin/activate
+
+python -m pip install \
+  "git+https://github.com/zeroknowledgediscovery/DTAG.git@main"
+
+export OPENAI_API_KEY="..."
+dtag-web                      # http://127.0.0.1:8000
+```
+
+`dtag-web --host 0.0.0.0 --port 8080` changes the bind address. The installed
+package contains the backend, the built frontend, maps, configs and the native
+runtime; models are fetched on demand.
+
+Other installed commands:
+
+```bash
+dtag-models --list            # public model catalog (* = installed)
+dtag-models gss/gss_2024      # install one model
+dtag-doctor                   # readiness checks
+```
+
+## Source checkout
+
+```bash
+git clone https://github.com/zeroknowledgediscovery/DTAG.git
+cd DTAG
+python3.13 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+cd webapp
+cp .env.example .env          # set OPENAI_API_KEY
+./run.sh                      # http://localhost:8000  (UI + API on one port)
+```
+
+Development mode (API auto-reload on :8000, Vite dev server with hot reload on
+:5173 proxying `/api`):
+
+```bash
+cd webapp && ./run.sh --dev
+```
+
+Rebuild the production frontend after UI changes:
+
+```bash
+cd webapp/frontend && npm ci && npm run build   # writes webapp/frontend/dist
+```
+
+The built `dist/` is committed so that direct Git installs do not need Node.
+
+## Docker
+
+One container, one port, models on a persistent volume (not in the image):
+
+```bash
+cd webapp
+cp .env.example .env          # set OPENAI_API_KEY
+docker compose up --build
+# open http://localhost:8000
+```
+
+or
+
+```bash
+docker build -f webapp/Dockerfile -t dtag-web .          # from the repo root
+docker run -p 8000:8000 -e OPENAI_API_KEY -v dtag-data:/data dtag-web
+```
+
+The image is based on `python:3.13-slim-trixie` because the prebuilt
+`dtag_lsm` extension requires CPython 3.13 and glibc ≥ 2.38. If it does not
+import, the build compiles it from `native/lsm_runtime` automatically
+(`--build-arg DTAG_REBUILD_NATIVE=1` forces this). No OpenAI or cloud
+credentials are baked into the image; the public model bucket is read
+anonymously over HTTPS.
+
+## Model cache management
+
+Resolution order (shared by `dtag-models`, the web server and the optimizer):
+
+1. `DTAG_MODEL_ROOT` if set;
+2. an already-populated `<repo>/models/lsm/` (developer checkouts);
+3. `~/.cache/dtag/models/`.
+
+Missing models are downloaded from the public release manifest
+(`DTAG_MODEL_RELEASE`, default `v0.2.1`), SHA256-verified, safely extracted
+once, validated (`source_maps/` + `trees/binary/`), then loaded **once per
+server process** into a persistent `dtag_lsm.Runtime`. Every later respondent
+using that model shares the resident runtime; each respondent keeps its own
+survey state.
+
+From the browser: select a profile, and the model panel shows
+`not installed → Downloading → Verifying → Extracting → Loading native LSM → Ready`.
+“Install model” prefetches; “Start respondent” installs automatically.
+
+From the API:
+
+```bash
+curl -X POST localhost:8000/api/models/gss/gss_2024/install          # background job
+curl localhost:8000/api/models/gss/gss_2024/status                  # poll
+curl -X POST 'localhost:8000/api/models/gss/gss_2024/install?wait=true&load=false'
+```
+
+From the shell: `dtag-models gss/gss_2024`, `dtag-models --family gss`,
+`dtag-models --all` (≈0.9 GB compressed, ≈6.6 GB installed).
+
+## Environment
+
+| Variable | Purpose |
+|---|---|
+| `OPENAI_API_KEY` | server-side only; never sent to the browser |
+| `DTAG_PASSWORD` | when set, the whole app requires this shared password (login page; `Authorization: Bearer <password>` for scripts); `/api/health` stays open |
+| `DTAG_SESSION_SECRET`, `DTAG_AUTH_HOURS` | login-cookie signing key (random per process if unset → restart logs everyone out) and lifetime (default 12 h) |
+| `DTAG_OPENAI_MODEL` | override the configured model (default `gpt-4.1-mini`) |
+| `DTAG_LLM_BACKEND=mock` | deterministic mock language layer for demos/tests (native anchors stay real; UI shows MOCK) |
+| `DTAG_MODEL_ROOT` | native model cache |
+| `DTAG_MODEL_RELEASE`, `DTAG_PUBLIC_BUCKET`, `DTAG_MODEL_MANIFEST_URL` | public model release |
+| `DTAG_CONFIG` | DTAG config (default `configs/dtag_config.yaml`) |
+| `DTAG_EURODATES` | Eurobarometer fieldwork registry (default `configs/eurodates.csv`) |
+| `DTAG_HOST`, `DTAG_PORT` | bind address |
+| `DTAG_WEB_DATA_DIR` | custom profiles (`profiles.json`) |
+| `DTAG_ASSETS_DIR` | possible-response and embedding caches |
+| `DTAG_MAX_SESSIONS`, `DTAG_SESSION_TTL_HOURS` | in-memory session store limits |
+| `DTAG_MAX_LOADED_MODELS` | resident native models kept in memory (default 6, LRU) |
+
+Run a **single worker process**: the native-model cache and sessions are
+process-level (`dtag-web` does this).
+
+## Using the workbench
+
+1. **Describe the respondent** (left, top): optionally start from a preset
+   (configured profiles from `configs/dtag_config.yaml`, or your custom ones),
+   then edit **Who** (description), **Where** (country) and **When** (year, or an
+   exact date for Eurobarometer). A country or year mentioned in the
+   description is detected and shown ("country Kenya ← “kenya”"); the fields
+   override it. US states and cities count as the United States.
+2. **The survey model is chosen for you.** DTAG proposes the best native model
+   from each survey family that covers the respondent and pre-selects a
+   default, ranked by time fit (within a year > within three years > further),
+   then by how directly the country conditions the model (categorical country
+   variable > national sample > country present but contextual > coordinate
+   proxy), then recency. Each option shows *when* (wave/round/fieldwork) and
+   *where* (what is actually conditioned). Pick another option, or “Choose a
+   specific native model…”, to override. Examples: Nigeria 2012 → Afrobarometer
+   R5 (`COUNTRY_ALPHA='Nigeria'`); France 2019-05-15 → Eurobarometer ZA7575;
+   India 2018 → WVS7 (`A_YEAR=2018` + coordinates); rural Alabama → GSS 2024.
+3. **The chosen model is downloaded (once) and loaded automatically**; the
+   option shows `download 2.4 MB → downloading → verifying → extracting →
+   loading → loaded`. Start respondent waits for it if it is still loading.
+4. **Start respondent.** Suggested questions appear (only questions that map
+   directly onto the loaded model's survey variables; hover shows which);
+   click one or type your own.
+5. **Centre**: each answer has a *Model evidence* panel (selected variables,
+   survey wording, full native distribution, anchor, rationale, mapping class,
+   fallback and map provenance, state updates, conditioning, timings).
+6. **Right**: model/map/wave/country/conditioning summary, ideology index and
+   trajectory (GSS only), session timeline (`DIRECT`, `SEMANTIC / ANSWER ONLY`,
+   `SEMANTIC / STATE UPDATE`, `NO MATCH`), current and initial survey state,
+   JSON/CSV export.
+
+### Question sequences
+
+**Run sequence…** (next to *Ask*) runs many questions, in order, through the
+current respondent. Upload a text file with one question per line, or paste
+them (blank lines and lines starting with `#` are ignored; a first line
+`question` is treated as a header, and a CSV with a `question` column such as
+`step,question` is read by that column, so the files in `assets/question_sets/`
+work as-is; up to 500 questions). `assets/question_sets/optimized/` has GSS 2024
+sets chosen to move the CM and WF personas in the same or opposite directions, and
+`assets/question_sets/polarization/` and `assets/question_sets/depolarization/` sets validated
+(with confidence intervals) to push them apart or toward each other with sampled answers. Optionally reset the respondent first;
+otherwise the sequence continues from the current state.
+
+Each question goes through the normal path (same native anchors, fallback
+rules and state updates), so the survey state carries forward from one answer
+to the next. Answers appear in the chat as they arrive, the ideology chart
+updates live, and the **Question sequence** card shows progress, lets you
+cancel after the current question, and — when the survey has an ideology
+index (GSS) — reports the index at the start and end of the sequence, the net
+change, the range, and the questions that moved it most (click to jump). The
+full per-question record is in the session's JSON/CSV export and the ZIP log.
+
+API: `POST /api/sessions/{id}/sequence` with `{"text": "...one per line...",
+"name": "...", "reset_first": false}` (or `{"questions": [...]}`) starts a
+background run; `GET /api/sessions/{id}/sequence[?since=N]` returns progress,
+new results and the ideology summary; `DELETE` cancels. While a sequence runs,
+interactive questions and reset return 409.
+
+### Ideology push (suggested next questions)
+
+For respondents whose survey has an ideology index (GSS), the right column shows
+**Next question** right below the ideology chart: two suggested questions, one predicted to
+move the index **up** (toward the R pole) and one **down** (toward the L pole), recomputed
+after every answer. The same two questions appear as one-click chips above the question input
+(for the respondent being asked). Click a suggested question to see its survey item, the basis
+of the prediction and every response; *ⓘ how this works* holds the explanation and the
+pole-items option.
+
+How they are chosen (one-step optimizer, `optimizer/session_push.py`):
+
+* every unanswered *opinion* item is scored exactly at the respondent's current state:
+  for each native response `a` of item `v`, `Δ_v(a) = I(s ∪ {v=a}) − I(s)` and the native
+  probability `P(a | s, v)` (incremental native evaluator: a few seconds for ~550 items).
+  Administrative, demographic and factual-behaviour items are never suggested; pole-defining
+  items only when **Allow pole-defining items** is ticked;
+* with response mode **max** the session records the respondent's most
+  likely answer, so the suggestion is the item whose modal answer moves the index most and the
+  shown Δ is exact. With **draw** (the default) the suggestion maximizes the expected change
+  `μ_v = Σ_a P(a) Δ_v(a)` (the realized change then varies with the drawn answer);
+* the shown question is written by the language model for exactly that item, in neutral wording
+  (no leading language). **all answers** lists every response with its probability and Δ.
+
+**Ask** has three modes, chosen with the **realistic | validated | push** toggle (default: realistic):
+
+* **realistic** — the suggested question is asked exactly like a typed question: the normal
+  mapping (lexical prefilter + language-model item selection) decides which survey items it
+  updates. It may update extra items, or miss the suggested item, so the realized change can
+  differ from the prediction shown (which is for the suggested item alone). Nothing is forced:
+  this is what would happen if a person asked that question.
+* **validated** — for the top 5 items per direction, the question written for each item is
+  first run through that same mapping (a dry run, cached per question). Questions whose mapping
+  misses their item are dropped; the rest are ranked by the exact change from answering *all*
+  the items they map to, and the chosen question is answered through that checked mapping. With
+  response mode **max** the recorded and plotted index then changes by exactly the shown amount.
+  Click a suggestion to see the items it maps to and which candidates mapped back (✓/✗).
+* **push** (`mode=direct` in the API) — the question is answered through *exactly* the suggested
+  survey item; the question-to-item mapping is skipped. The index changes by the predicted
+  amount for that item (exactly, with response mode **max**). This is the most idealized mode:
+  the question is only the item's wording, never checked against the mapping.
+
+Chat entries are tagged **PUSH ↑/↓** (plus *missed item* when a realistic question did not map
+to its item); the tooltip shows the mode, the mapped items and predicted vs realized change. If
+the respondent's state is at its size limit, an older answer is evicted and the change may differ.
+
+**Push [↑/↓] [N] steps · Run** (automatic push) asks the suggestion for one direction step by step in the selected mode (each step re-scores
+at the new state), for a chosen number of steps; it runs like a question sequence (progress card,
+cancel, results in the log) and stops early if no item moves the index further.
+
+API: `GET /api/sessions/{id}/ideology-push[?include_pole_items=true&mode=realistic|validated|direct]` →
+`{up, down, objective, mode, n_candidates, up_checked, down_checked, ...}`;
+`POST /api/sessions/{id}/ideology-push/ask` with `{"variable", "question", "direction", "mode"}` →
+a question result with `push: {mode, mapped_variables, hit, predicted_modal_delta,
+predicted_expected_delta, predicted_joint_delta, realized_delta}`;
+`POST /api/sessions/{id}/ideology-push/auto` with `{"direction": "up"|"down", "steps": N,
+"include_pole_items": false, "mode": "realistic"}` starts the background run (poll/cancel via
+`.../sequence`).
+
+These are information-conditioning effects of a fixed survey model, not persuasion of people.
+
+### Decision landscape (left column)
+
+Once a respondent is running and its setup collapses, the left column shows the **decision
+landscape** under the DTAG Lab mark: the survey model's predicted answer to every askable item
+for this respondent's digital twin, and how each interaction reshapes it
+(`optimizer/landscape.py`, `GET /api/sessions/{id}/landscape`).
+
+* **Outer ring:** one thin wedge per unanswered item, grouped into topic arcs (keyword topics,
+  `optimizer/topics.py`; roster/interviewer items in *Background*). Wedge length = how settled the
+  predicted answer is (1 − normalized entropy). Colour (surveys with ideology poles) = lean: the
+  index change if the twin answered as it most likely would — blue toward L, red toward R, grey
+  neutral. Within a topic, wedges are ordered L→R at the start and keep their places.
+* **Moved predictions:** after each answer, wedges whose predicted distribution changed
+  (Jensen–Shannon divergence > 1e-4 bits) pulse, rippling out from the newly answered item, with
+  a spike whose length grows with the shift; their topic labels turn bold. The caption counts them
+  and names the topics most affected, with the top movers listed below.
+* **Inner ring:** answered (anchored) items as beads in their topic; new ones are larger.
+* Hover any wedge, bead or topic for details.
+
+The **doughnut | map** toggle (remembered per browser) switches to a terrain view: items are placed
+on a fixed 2D map (topic regions; items whose model trees split on each other are pulled together,
+force-directed layout cached per model, `optimizer.landscape.layout`). The ground is a smoothed
+field over that map: **height = how undecided** the predicted answers are, so settled opinions are
+deep-coloured valleys and undecided ones pale high ground; answered items are dark pins on the
+valley floor; colour is the lean (blue L, red R) where the survey has poles; contours mark height
+levels. Predictions moved by the last answer get an expanding ring, rippling out from the new pin,
+which shows how local the effect of one answer is.
+
+The landscape shares the one-step optimizer pass with the push suggestions (one native pass of
+about a second per state on GSS). Surveys without ideology poles (WVS, Afrobarometer,
+Eurobarometer) get the landscape without lean colour. Their models are much denser (each item's
+tree splits on ~100+ others vs ~11 in GSS), so predicting every item costs 10–40 s; the landscape
+is therefore computed in the background (the previous one stays visible with a spinner, and
+questions are never blocked), and after each answer only items whose trees split on a changed
+variable are recomputed (exactly equal to a full recomputation).
+
+The view is **live**: the moment an answer lands, every prediction that can change (known from the
+model's dependency graph) starts shimmering; items are then recomputed most-affected first in small
+batches, and each batch is published (the client polls every ~0.35 s), so moved spikes and top movers
+appear progressively while a thin progress bar fills. Wedges and the terrain morph smoothly between
+updates. Intermediate views are approximate (not-yet-recomputed items show their previous value);
+the final one is exact. These are model predictions for the twin, not the person's
+reasoning.
+
+### Experiments: record, rerun N times, statistics
+
+Everything done to a respondent is recorded as a **recipe** (right column, *Experiment*): typed
+questions, pushes (direction + mode), auto-pushes, question sequences and suggested next questions.
+Pushes and suggested questions are recorded as *intent*; resetting the respondent starts a new recipe.
+
+**Rerun ×N** replays the recipe N times (background job, one experiment at a time). Each run is a
+fresh respondent from the same profile, so the persona interpretation can differ; each run gets its
+own seed (`base_seed + run`, which matters for `resp_mode: draw`); pushes and suggested questions are
+re-chosen at that run's own state, and every question actually asked is logged. The panel shows the
+mean ideology after each action with a 95% bootstrap CI band (every run as a faint line), the net
+change with its CI, the push hit rate, and which questions each action asked across runs.
+
+Results are written to `experiments/<name>_<timestamp>/` in the repository (or `$DTAG_EXPERIMENTS_DIR`):
+`recipe.json`, `manifest.json` (git commit, model, LLM, seeds), `report.md`; per run
+`runs/run_NN/trace.jsonl` (every question: items, answers, I before/after, push outcome),
+`state_changes.csv` (every answer that changed, old → new, at every step), `states.csv` (the full
+survey state after every question) and `session_log/` (the same files as *Full log (ZIP)*, unpacked);
+and `summary/` (`steps.csv`, `checkpoints.csv`, `stats.csv`, `questions.csv`, `final_answers.csv`,
+`state_changes.csv` and `states.csv` across all runs, `stats.json`). *Download results (ZIP)* returns
+the whole folder. (*Full log (ZIP)* in the Respondent model section is the log of the one live session.)
+
+API: `GET /api/sessions/{id}/experiment[?download=true]` (recipe), `POST .../experiment/run`
+`{"runs": 20, "name": ""}`, `POST /api/experiments/run` `{"recipe": {...}, "runs": 20}` (an uploaded
+recipe), `GET|DELETE /api/experiments/jobs/{job_id}`, `GET /api/experiments`,
+`GET /api/experiments/{folder}/download`.
+
+### Layout at a glance
+
+The chat sits on a framed stage in the middle; the side columns are tool rails. Left: the respondent
+card and the decision landscape. Right: the ideology chart and the two suggested next questions, then
+tabs for **Auto-push** (surveys with an ideology index), **Experiment** and **Session** (model details,
+one **Export ▾** menu with the full log ZIP / JSON / CSV, the timeline and the state tables); the last
+tab you used is remembered. The suggested questions are repeated as chips above the input only when
+the columns are stacked (narrow screens). Click **DTAG** or **About** in the top bar for credits
+(ZeD Lab, University of Kentucky · ishanu_ch@uky.edu), data sources and the running version.
+
+### Resizing the columns
+
+Drag the border between the left (respondent / landscape) or right (ideology, push, experiment) column
+and the chat to resize it; double-click a border to reset, or focus it and use ←/→ (Shift for bigger
+steps). The chat reflows (text wraps) rather than being covered, and never gets narrower than 360 px.
+Figures follow their column: the doughnut and the map scale up, the line charts redraw at the new
+width with the same text size. Widths are remembered per browser, separately for one and two
+respondents; once a column has been resized, a **reset layout** button (columns icon) appears in the
+top bar. On narrow screens (< 1100 px) the columns stack and the handles are hidden.
+
+### Saving figures
+
+Hover any figure (ideology trajectory, landscape doughnut or map, experiment band) and use the small
+download button at its top-right: **SVG** (vector), **PNG** (4× resolution) or **PDF** (vector; the
+landscape map, which is drawn on a canvas, is embedded as a 4× image). Files are self-contained (styles
+and theme colours inlined) and use the current light/dark theme; hover highlights are left out.
+
+### Two respondents side by side
+
+The **Respondents 1 | 2** switch in the top bar adds a second respondent (the
+choice is remembered in the browser). Each respondent is fully independent:
+its own description (who / where / when), its own recommended or hand-picked
+native model (A can be GSS 2024 while B is GSS 2018 or another survey), its
+own behaviour settings and its own server session. Respondent A opens on the
+`gss2024_cm` preset and B on `gss2024_wf`.
+
+- **Left**: tabs *Respondent A* / *Respondent B* switch which setup is shown;
+  *Start both respondents* starts (or restarts) both, and each tab keeps its
+  own *Start* / *Reset*.
+- **Centre**: the chat splits into two columns, blue for A and orange for B,
+  each headed by its model, description and current ideology index. The
+  composer's **Both / A only / B only** selector decides who gets the
+  question; *Both* sends it to both at the same time and each answers from
+  its own model and state. *Run sequence…* runs the list on the selected
+  respondent(s) in parallel.
+- **Right**: *Ideology · A vs B* plots both trajectories on one chart (A: solid
+  line, circles; B: dashed line, squares — so color is never the only cue),
+  with current / initial / change for each and the gap A − B. When the two
+  use different waves, each index is measured against its own wave's poles
+  (noted under the chart). Below it, tabs show each respondent's model,
+  timeline, state and exports.
+
+Switching back to one respondent hides B without ending its session.
+
+“Save as custom profile” stores the current respondent (never in the config
+file); “Advanced profile builder…” also lets you choose the semantic map.
+
+Country conditioning (`pipeline_localized`, used by every session) uses, in
+order: a variable named *country* (e.g. Afrobarometer `COUNTRY_ALPHA`,
+Eurobarometer `country="FR - France"`); the Eurobarometer ISO 3166 variable
+`isocntry` (`FR`, `DE-W`, …; this decodes the 2021–2023 waves whose `country`
+is numeric-only); and, for older Eurobarometer waves, the variable the semantic
+map labels `NATION` (`v3`/`v4`/… with values like `FRANCE`, `DEUTSCHLAND`).
+The extra steps apply only when the earlier ones find nothing and accept a
+value only if it is the unique match, so "Germany" in a wave split into East
+and West stays contextual. All 207 Eurobarometer waves carry usable country
+information.
+
+The recommender's country/year coverage comes from `configs/model_coverage.json`,
+generated from the models' own source maps by
+`python scripts/build_model_coverage.py` (streams each public archive, reads
+only its source maps). Afrobarometer round periods are approximate published
+fieldwork years (the native models carry no date variable). Starter questions
+live in `configs/suggested_questions.yaml`. At most `DTAG_MAX_LOADED_MODELS`
+(default 6) models stay resident; the least recently used is released first.
+
+## API
+
+OpenAPI docs: `http://localhost:8000/docs`.
+
+```text
+GET    /api/health                         GET  /api/readiness[?refresh=true]
+GET    /api/profiles                       GET  /api/profiles/{name}
+POST   /api/profiles/validate              POST /api/profiles        DELETE /api/profiles/{name}
+GET    /api/models[?family=]               GET  /api/models/{family}/{name}
+GET    /api/models/{family}/{name}/status  POST /api/models/{family}/{name}/install[?load=&wait=]
+GET    /api/maps                           GET  /api/polar-vectors   GET /api/geography
+POST   /api/recommend                      GET  /api/countries       GET /api/sessions/{id}/suggestions
+POST   /api/sessions/{id}/sequence         GET  /api/sessions/{id}/sequence[?since=N]   DELETE /api/sessions/{id}/sequence
+GET    /api/sessions/{id}/ideology-push[?include_pole_items=&mode=]   POST /api/sessions/{id}/ideology-push/ask
+POST   /api/sessions/{id}/ideology-push/auto
+GET    /api/eurobarometer/waves[?year=]    GET  /api/eurobarometer/resolve?date=|za=|year=
+POST   /api/sessions                       GET  /api/sessions        GET /api/sessions/{id}
+POST   /api/sessions/{id}/questions        POST /api/sessions/{id}/reset
+DELETE /api/sessions/{id}                  GET  /api/sessions/{id}/export?format=json|csv|zip[&label=A]
+GET    /api/export/bundle?ids=SID1,SID2&labels=A,B
+```
+
+Example:
+
+```bash
+SID=$(curl -s -X POST localhost:8000/api/sessions -H 'content-type: application/json' \
+  -d '{"profile":"gss2024_cm","overrides":{"resp_mode":"max","semantic_fallback":"answer_only"}}' \
+  | python -c 'import json,sys;print(json.load(sys.stdin)["session_id"])')
+
+curl -s -X POST localhost:8000/api/sessions/$SID/questions -H 'content-type: application/json' \
+  -d '{"question":"What are your thoughts about immigration?"}'
+
+curl -s "localhost:8000/api/sessions/$SID/export?format=csv"
+curl -s -o session.zip "localhost:8000/api/sessions/$SID/export?format=zip&label=A"
+```
+
+### Session logs for reports (ZIP)
+
+**Full log (ZIP)** in each respondent's panel downloads everything about that respondent
+since it was started or last reset (a reset starts a new history; earlier questions are not
+kept). In two-respondent mode, **Download both logs (ZIP)** puts both in one archive with an
+aligned comparison. Each respondent folder contains:
+
+| File | Contents |
+|---|---|
+| `report.md` | readable summary: persona, model, settings, ideology start → end, largest moves, every question |
+| `questions.csv` / `questions.jsonl` | one row per question; the JSONL has the full record (answer, evidence, distributions) |
+| `ideology_trajectory.csv`, `ideology.svg` | ideology after every question (step 0 = initial state) and a chart |
+| `state_changes.csv` | every survey-state change with its previous value (and evictions) |
+| `persona.txt`, `persona_initialization.json` | the description, the LLM's raw assignments, dropped ones, rationale, forced assignments |
+| `initial_state.csv`, `final_state.csv` | survey state with each variable's question wording |
+| `settings.json`, `poles.csv` | profile, run configuration, LLM, conditioning; the exact pole file used |
+| `sequence.json` | the latest question sequence, if it ran since the last reset |
+| `session.json` | the complete engine export (same as *Export JSON*) |
+| `manifest.json` | DTAG version and commit, model checksum, counts, a checksum for every file |
+
+The two-respondent archive adds `comparison.csv` / `comparison.svg` (trajectories side by
+side, by question number) and `bundle_manifest.json`.
+
+Eurobarometer by date and country:
+
+```bash
+curl -s -X POST localhost:8000/api/sessions -H 'content-type: application/json' -d '{
+  "model_key": "eurobarometer/ZA7575_v1-0-0",
+  "overrides": {"date": "2019-05-15", "country": "France"}}'
+```
+
+Only whitelisted, bounded override fields are accepted (persona, country,
+continent, year, date, za, model_key, map_key, ideology, polar_set,
+semantic_fallback, resp_mode, semantic_resp_mode, seed and numeric runtime
+parameters). Model keys are validated against the catalog, map keys against
+the repository map inventory, and polar-vector sets against the families they
+are registered for. No paths, commands, modules or URLs are accepted.
+
+## Scientific notes
+
+* **WHERE** is reported exactly as applied: `categorical_country` (e.g.
+  Afrobarometer `COUNTRY_ALPHA`, Eurobarometer `country="FR - France"`),
+  `coordinates` (WVS `O1_LONGITUDE`/`O2_LATITUDE` snapped to model support), or
+  `survey_context_only` (e.g. GSS: the country appears in the persona text but
+  constrains no model variable).
+* **WHEN**: GSS time selects a wave model; WVS may condition `A_YEAR`;
+  Eurobarometer dates route to exactly one fieldwork interval from
+  `configs/eurodates.csv` (ambiguous or uncovered dates are errors; a year alone
+  never selects a wave; no interpolation between waves).
+* **Ideology** is `I(s) = (d(sL,s) − d(sR,s)) / d(sL,sR)` with native
+  qdistance, available only for GSS with the registered polar vectors. It is
+  never derived from answer text and never reused for other survey families.
+* **Semantic fallback**: `off` (no fallback), `answer_only` (grounds the answer
+  but never mutates state), `update_state` (accepted bridge anchors update
+  state; **the default**). Each answer records which case applied.
+* **Response mode** applies to the native anchor: `draw` (**the default**) samples the
+  native distribution with seed `seed + question`; `max` takes the modal response.
+* Eurobarometer maps built by semantic-union fallback keep their provenance
+  (`map_provenance`, `fallback_*`) on every anchor and in exports.
+* Exports include DTAG version and Git commit, model key/release/SHA256, map
+  provenance summary, profile, persona text, requested/resolved geography and
+  time, seed, response mode, fallback mode, LLM model, initial state, every
+  question with selected variables, full distributions, anchors, state updates,
+  ideology and timings, plus the CLI-schema records.
+
+## Access control
+
+Set `DTAG_PASSWORD` to protect a shared or internet-facing server. Browsers get
+a sign-in page and an HttpOnly, SameSite=Lax cookie (Secure over HTTPS) signed
+with HMAC-SHA256 and bound to the password (changing the password signs
+everyone out). Failed logins are throttled per client (10 per 15 min). All
+pages and API routes are protected except `/api/health` (for load-balancer
+probes). Always serve it over HTTPS (e.g. Caddy or a cloud load balancer) so
+the password is never sent in clear text. With `DTAG_PASSWORD` unset (the
+default) the app is open, which is intended for local use only.
+
+```bash
+curl -H "Authorization: Bearer $DTAG_PASSWORD" https://<host>/api/profiles
+```
+
+## Tests
+
+```bash
+pip install pytest httpx
+cd webapp/tests
+pytest -q                         # all tiers; native tier downloads gss/gss_2024 if needed
+DTAG_TEST_OFFLINE=1 pytest -q     # skip the native/network tier
+```
+
+The fast tier uses a deterministic fake native backend and a mock language
+layer. The native tier runs against a real model: model-load-once/shared
+runtime with independent respondent state, runtime persistence and latency,
+concurrent sessions on one model, fallback semantics, API end-to-end,
+and country conditioning for any installed Afrobarometer/WVS/Eurobarometer
+models. No test needs `OPENAI_API_KEY`.
+
+Development benchmark in this environment (GSS 2024, 813 features): preload
+≈6.6 s once; single-variable prediction ≈0.4 ms; qdistance ≈0.07 s; two pole
+distances ≈0.1 s. These are reference numbers, not guarantees.

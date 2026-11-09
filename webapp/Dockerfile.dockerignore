@@ -1,0 +1,15 @@
+.git
+**/__pycache__
+**/*.pyc
+.venv
+venv
+models/lsm/*
+!models/lsm/README.md
+models/releases
+models/public_releases
+outputs/*
+data/raw/*
+webapp/frontend/node_modules
+webapp/data/*
+webapp/.env
+native/lsm_runtime/build
